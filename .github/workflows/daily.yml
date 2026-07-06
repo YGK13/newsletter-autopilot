@@ -1,0 +1,51 @@
+name: Newsletter Autopilot — daily draft
+
+on:
+  schedule:
+    # Default: 04:00 UTC = 07:00 Israel time (summer). Change this to match
+    # YOUR cadence -- keep it in sync with config/brand.json's "cadence_cron".
+    - cron: '0 4 * * 1-4'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Log only, do not commit/post/email'
+        type: boolean
+        default: false
+
+concurrency:
+  group: newsletter-autopilot
+  cancel-in-progress: false
+
+permissions:
+  contents: write  # needed to commit generated header images and LEARNINGS.md updates
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the daily draft
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BEEHIIV_API_KEY: ${{ secrets.BEEHIIV_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          GIPHY_API_KEY: ${{ secrets.GIPHY_API_KEY }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_PAGE_ID: ${{ secrets.NOTION_PAGE_ID }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: python scripts/draft_newsletter.py

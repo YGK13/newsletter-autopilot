@@ -1,0 +1,26 @@
+{
+  "_comment": "Copy this file to config/brand.json and fill in your own values. This is the ONLY file with mechanical settings (IDs, links, colors, cron). Your voice, structure and editorial rules live in PLAYBOOK.md and LEARNINGS.md, not here.",
+
+  "publication_name": "Your Newsletter Name",
+  "beehiiv_publication_id": "pub_00000000-0000-0000-0000-000000000000",
+  "publication_url": "https://your-newsletter.beehiiv.com/",
+
+  "author_name": "Your Name",
+  "notify_email": "you@gmail.com",
+
+  "cadence_cron": "0 4 * * 1-4",
+  "cadence_note": "Default fires 07:00 Israel-time Mon-Thu (UTC 04:00). Adjust for your own timezone and cadence -- see PROTOCOL.md section 6.",
+
+  "content_tags": ["daily-signal"],
+
+  "image_brand": {
+    "background_hex": "#0B0B0C",
+    "accent_hex": "#C9A04A",
+    "accent_dim_hex": "#8C6C2C",
+    "accent_bright_hex": "#E8C26F",
+    "mood": "cinematic editorial photograph, Bloomberg or Financial Times feature mood",
+    "never": ["text", "logos", "faces", "AI/robot clichés", "screens"]
+  },
+
+  "footer_html": "<hr><p><em>[YOUR NEWSLETTER] is written by [YOUR NAME]. Reply to this email, I read every one.</em></p><p><strong>Forwarded this? <a href=\"https://your-newsletter.beehiiv.com/\">Subscribe free →</a></strong></p>"
+}
