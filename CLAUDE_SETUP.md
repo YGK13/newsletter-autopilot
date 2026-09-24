@@ -179,10 +179,12 @@ it to them for approval and light editing):
 ### Step 5 — Local dry run
 
 ```bash
+DRY_RUN=1 python scripts/draft_newsletter.py
 python scripts/draft_newsletter.py
 ```
 
-Explain what to expect: this will actually create a DRAFT post in their
+Explain what to expect: the first command researches and drafts but writes and
+sends nothing (only ANTHROPIC_API_KEY is required for it). The second will actually create a DRAFT post in their
 Beehiiv account (never sent) and email them a LinkedIn draft. Help them set
 the required environment variables locally first (a `.env` file, copied from
 `.env.example`, with their real keys pasted in -- warn them never to commit
