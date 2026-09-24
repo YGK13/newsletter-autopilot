@@ -155,8 +155,50 @@ def load_linkedin_stats() -> list[dict[str, Any]]:
     return rows
 
 
-def update_learnings(dataset: list[dict[str, Any]], linkedin_rows: list[dict[str, Any]], model: str) -> str:
-    """Call Claude the analyst, write the returned markdown back to LEARNINGS.md, return it."""
+# Refuse any write-back shorter than this fraction of the prior file.
+MIN_LENGTH_RATIO = 0.8
+
+
+def _headings(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.startswith("## ")]
+
+
+def guard_learnings(updated: str, current: str, stop_reason: str | None) -> str | None:
+    """
+    TRUNCATION GUARD, ported from leverage-signal-automation (commit 89c144e).
+
+    Never let the loop destroy its own memory. The analyst echoes the WHOLE file
+    back, so a reply cut off at max_tokens, a refusal, or a model that simply drops
+    sections would otherwise be written over LEARNINGS.md and auto-committed. The
+    parent repo lost its file to exactly this once. Returns a reason string when
+    the write-back must be refused, or None when it is safe.
+    """
+    if stop_reason != "end_turn":
+        return f"stop_reason={stop_reason} (expected end_turn)"
+    if not updated.strip():
+        return "empty reply"
+    missing = [h for h in _headings(current) if h not in _headings(updated)]
+    if missing:
+        return f"missing section(s) {missing}"
+    if len(updated) < MIN_LENGTH_RATIO * len(current):
+        return f"too short (len={len(updated)} prev_len={len(current)})"
+    return None
+
+
+def update_learnings(
+    dataset: list[dict[str, Any]],
+    linkedin_rows: list[dict[str, Any]],
+    model: str,
+    write: bool = True,
+) -> str:
+    """
+    Call Claude the analyst and write the returned markdown back to LEARNINGS.md
+    ONLY if it passes the truncation guard. Returns the learnings the drafter should
+    use: the new file when accepted, otherwise the prior one. A missed annotation is
+    cheap; losing accumulated rules is not.
+
+    write=False (DRY_RUN) runs the analysis and the guard but leaves the file alone.
+    """
     current = LEARNINGS_PATH.read_text(encoding="utf-8")
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
@@ -167,18 +209,30 @@ def update_learnings(dataset: list[dict[str, Any]], linkedin_rows: list[dict[str
         f"===== LINKEDIN LOG (last {len(linkedin_rows)} rows) =====\n{json.dumps(linkedin_rows, indent=2)}\n"
     )
 
-    resp = client.messages.create(
+    # LEARNINGS.md grows with every pass (append-and-annotate) and the analyst must
+    # echo all of it, so the output budget has to comfortably exceed the file. 8000
+    # is what truncated the parent repo's file. A budget this large requires
+    # streaming in the SDK, which also avoids HTTP timeouts on long replies.
+    with client.messages.stream(
         model=model,
-        max_tokens=8000,
+        max_tokens=32000,
         system=ANALYST_SYSTEM,
         messages=[{"role": "user", "content": user_content}],
-    )
-    updated = "".join(getattr(b, "text", "") for b in resp.content).strip()
+    ) as stream:
+        resp = stream.get_final_message()
+    updated = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text").strip()
     if updated.startswith("```"):
         updated = updated.split("```", 2)[1]
         if updated.lstrip().lower().startswith("markdown"):
             updated = updated.split("\n", 1)[1]
         updated = updated.rstrip("`").strip()
 
-    LEARNINGS_PATH.write_text(updated, encoding="utf-8")
+    reason = guard_learnings(updated, current, getattr(resp, "stop_reason", None))
+    if reason:
+        print(f"      [truncation guard] REFUSED write-back ({reason}). Keeping prior LEARNINGS.md.")
+        return current
+    if not write:
+        print(f"      (DRY RUN) Analyst update passed the guard ({len(current)} -> {len(updated)} chars); not written.")
+        return current
+    LEARNINGS_PATH.write_text(updated + "\n", encoding="utf-8")
     return updated
