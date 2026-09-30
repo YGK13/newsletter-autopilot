@@ -10,6 +10,8 @@ Pipeline:
   0. LEARN — pull last 30 published Beehiiv posts + stats, and the manual
      LinkedIn engagement log (LINKEDIN_STATS.csv). Call Claude the analyst
      to update LEARNINGS.md with any new evidence-based rules from both channels.
+     A truncation guard refuses any write-back that lost a section, shrank by
+     more than 20%, or did not finish cleanly.
   1. DRAFT — call Claude with web_search + PLAYBOOK.md + LEARNINGS.md.
      Get structured JSON: title, subtitle, subject, preview, body, image
      prompts (email + LinkedIn), GIF keywords (email + LinkedIn), LinkedIn copy.
@@ -22,6 +24,8 @@ Pipeline:
   5. LINKEDIN — email the LinkedIn copy + its image/GIF to your own Gmail
      for copy-paste.
   6. COUNTER — advance the issue counter that drives the next alternation.
+
+DRY_RUN=1 runs steps 0-1 read-only and stops before anything is written or sent.
 
 Every step logs. Nothing publishes. Nothing sends externally except the
 self-email of the LinkedIn copy.
@@ -49,8 +53,16 @@ from header_asset import bump_issue_count, build_header_asset
 from learning_loop import load_linkedin_stats, pull_recent_dataset, update_learnings
 from notion_research import notion_configured, pull_research_catalog_text
 
-DRAFTER_MODEL = "claude-opus-4-7"
-ANALYST_MODEL = "claude-opus-4-7"
+# Opus for both calls, mirroring the parent repo (leverage-signal-automation),
+# which deliberately drafts on Opus for quality. To trade some quality for cost,
+# set DRAFTER_MODEL = "claude-sonnet-5".
+DRAFTER_MODEL = "claude-opus-5-5"
+ANALYST_MODEL = "claude-opus-5-5"
+
+# DRY_RUN (the workflow_dispatch input, or DRY_RUN=1 locally) researches, runs the
+# analyst and drafts, but makes NO writes: no LEARNINGS.md write, no image
+# generation, no git commit/push, no Beehiiv draft, no email, no counter bump.
+DRY_RUN = os.environ.get("DRY_RUN", "").strip().lower() in ("1", "true", "yes")
 
 REQUIRED_ENV = [
     "ANTHROPIC_API_KEY",
@@ -118,7 +130,10 @@ The script replaces it with the public post URL after the draft is created.
 
 
 def check_env() -> None:
-    missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
+    # A dry run only reads: it needs the model key, and Beehiiv for the (optional)
+    # stats pull. Nothing that writes or sends.
+    required = ["ANTHROPIC_API_KEY"] if DRY_RUN else REQUIRED_ENV
+    missing = [k for k in required if not os.environ.get(k)]
     if missing:
         sys.exit(f"Missing required env vars: {', '.join(missing)}")
 
@@ -141,6 +156,9 @@ def strip_json_fences(text: str) -> str:
 
 
 def git_commit_and_push(paths: list[str], message: str) -> None:
+    if DRY_RUN:
+        print("      (DRY RUN — skipping git commit/push)")
+        return
     if not os.environ.get("GITHUB_ACTIONS"):
         print("      (skipping git push — not in GitHub Actions)")
         return
@@ -170,24 +188,36 @@ def draft_newsletter(playbook: str, learnings: str) -> dict:
         if research
         else "(No Notion research catalog configured -- rely on web_search alone.)"
     )
-    resp = client.messages.create(
-        model=DRAFTER_MODEL,
-        max_tokens=8000,
-        system=DRAFTER_TEMPLATE.format(playbook=playbook, learnings=learnings, research_block=research_block),
-        tools=[{"type": "web_search_20250305", "name": "web_search"}],
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"Today is {today_human()}. Draft today's issue. "
-                    "Do the web search, apply the LEARNINGS.md rules to the title "
-                    "especially, and return the JSON."
-                ),
-            }
-        ],
-    )
-    text = "".join(getattr(b, "text", "") for b in resp.content)
-    return json.loads(strip_json_fences(text))
+    messages: list[dict] = [
+        {
+            "role": "user",
+            "content": (
+                f"Today is {today_human()}. Draft today's issue. "
+                "Do the web search, apply the LEARNINGS.md rules to the title "
+                "especially, and return the JSON."
+            ),
+        }
+    ]
+    # The server-side web search can pause a long turn (stop_reason "pause_turn");
+    # the turn is resumed by sending the partial assistant content straight back.
+    # Streaming keeps a long research turn clear of HTTP timeouts.
+    for _ in range(5):
+        with client.messages.stream(
+            model=DRAFTER_MODEL,
+            max_tokens=16000,
+            system=DRAFTER_TEMPLATE.format(playbook=playbook, learnings=learnings, research_block=research_block),
+            tools=[{"type": "web_search_20260209", "name": "web_search"}],
+            messages=messages,
+        ) as stream:
+            resp = stream.get_final_message()
+        if resp.stop_reason != "pause_turn":
+            break
+        messages = messages + [{"role": "assistant", "content": resp.content}]
+    if resp.stop_reason != "end_turn":
+        raise RuntimeError(f"Drafter stopped with stop_reason={resp.stop_reason}; refusing a partial draft.")
+    # Only the final text block holds the JSON; earlier text can be research notes.
+    texts = [b.text for b in resp.content if getattr(b, "type", "") == "text" and b.text.strip()]
+    return json.loads(strip_json_fences(texts[-1] if texts else ""))
 
 
 def email_linkedin_to_self(draft: dict, public_url: str, linkedin_image_url: str, brand: dict) -> None:
@@ -218,12 +248,16 @@ def main() -> None:
 
     # 0 · LEARN
     print("[0/6] Pulling last 30 published posts + LinkedIn log, updating LEARNINGS.md…")
-    dataset = pull_recent_dataset(brand["beehiiv_publication_id"], limit=30)
+    try:
+        dataset = pull_recent_dataset(brand["beehiiv_publication_id"], limit=30)
+    except Exception as e:  # noqa: BLE001 - a stats outage must not cost the issue
+        print(f"      Beehiiv stats pull failed ({e}). Continuing with existing learnings.")
+        dataset = []
     linkedin_rows = load_linkedin_stats()
     print(f"      Pulled {len(dataset)} Beehiiv posts, {len(linkedin_rows)} LinkedIn log rows.")
     if dataset or linkedin_rows:
         try:
-            update_learnings(dataset, linkedin_rows, model=ANALYST_MODEL)
+            update_learnings(dataset, linkedin_rows, model=ANALYST_MODEL, write=not DRY_RUN)
             git_commit_and_push(["LEARNINGS.md"], f"learnings update {today_iso()}")
         except Exception as e:
             print(f"      Analyst update failed ({e}). Continuing with existing learnings.")
@@ -238,6 +272,13 @@ def main() -> None:
     draft = draft_newsletter(playbook, learnings)
     print(f"      Title: {draft['title']}")
     print(f"      Signal: {draft['signal_summary']}")
+
+    if DRY_RUN:
+        print("\nDRY RUN complete. No images, commits, Beehiiv draft, email or counter bump.")
+        print(f"   Subject: {draft.get('subject_line')}")
+        print(f"   Body:    {len(draft.get('body_html') or '')} chars of HTML.")
+        print("   Passed:  " + " | ".join(str(x) for x in draft.get("passed_on", [])))
+        return
 
     # 2 · HEADER ASSET (alternates image/GIF by issue count -- see header_asset.py)
     print("[2/6] Building header asset (image/GIF alternation)…")
@@ -296,14 +337,20 @@ def main() -> None:
     email_linkedin_to_self(draft, public_url, linkedin_image_url, brand)
 
     # 6 · ISSUE COUNTER
+    # The counter must be committed, or every Actions run starts again from 0 on a
+    # fresh checkout and the header never alternates to a GIF.
     print("[6/6] Advancing issue counter for next alternation…")
-    bump_issue_count()
+    try:
+        count = bump_issue_count()
+        git_commit_and_push(["state/issue_count.json"], f"issue counter {count}")
+    except Exception as e:  # noqa: BLE001 - the issue is already drafted and sent
+        print(f"      Counter commit failed ({e}). Not fatal; alternation may repeat once.")
 
     print("\n✅ Done.")
     print(f"   Editor:  {editor_url}")
     print(f"   Public:  {public_url}")
     print(f"   Signal:  {draft['signal_summary']}")
-    print(f"   Passed:  " + " | ".join(draft.get("passed_on", [])))
+    print(f"   Passed:  " + " | ".join(str(x) for x in draft.get("passed_on", [])))
 
 
 if __name__ == "__main__":

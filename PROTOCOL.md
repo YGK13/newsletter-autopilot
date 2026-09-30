@@ -242,10 +242,12 @@ your starting beliefs; the system will refine them with evidence.
 ### Step 4: local dry run
 
 ```bash
-python scripts/draft_newsletter.py
+DRY_RUN=1 python scripts/draft_newsletter.py   # research + analyst + draft, writes/sends nothing
+python scripts/draft_newsletter.py             # the real thing
 ```
 
-This posts a real DRAFT to Beehiiv (never sends) and emails you the LinkedIn
+The first command prints the drafted title, subject and body size and stops
+before any image, commit, Beehiiv draft or email. The second posts a real DRAFT to Beehiiv (never sends) and emails you the LinkedIn
 copy. Open the Beehiiv editor link the script prints. Read the draft. If the
 voice is off, tune `PLAYBOOK.md` and rerun -- each run costs a few cents.
 
